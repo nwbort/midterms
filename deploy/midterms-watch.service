@@ -1,0 +1,17 @@
+[Unit]
+Description=Guardian midterms tracker -> ntfy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=midterms
+WorkingDirectory=/opt/midterms
+EnvironmentFile=/opt/midterms/.env
+Environment=STATE_FILE=/opt/midterms/state.json
+ExecStart=/usr/bin/python3 /opt/midterms/watch.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
