@@ -11,10 +11,10 @@ Polls the Guardian's US midterms data and sends [ntfy](https://ntfy.sh) pushes f
 - **House districts** (`.../details/results_H.json`, rated by the Guardian's
   `battlegrounds.json`):
   - any call in a **Toss Up** district
-  - a **Lean** or **Likely** district called as a flip
+  - any district (Lean, Likely or Solid) called as a flip
   - a withdrawn call for either of the above
-  - Solid seats are ignored. Ratings are fetched once at startup and saved
-    in the state file in case a later fetch fails.
+  - Ratings are fetched once at startup and saved in the state file in case
+    a later fetch fails.
 
 Example notifications:
 

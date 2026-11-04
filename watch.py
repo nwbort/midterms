@@ -4,8 +4,8 @@
 Senate: notifies when a race in SENATE_STATES (the toss-ups) is called, or when
 any race is called as a flip.
 House: notifies once, when a party reaches a majority (218 seats); on any call
-in a Toss Up district; and when a Lean or Likely district is called as a flip.
-Ratings come from the Guardian's battlegrounds.json. Solid seats are ignored.
+in a Toss Up district; and when any district is called as a flip.
+Ratings come from the Guardian's battlegrounds.json.
 
 Standard library only. Configuration is via environment variables:
 
@@ -214,7 +214,7 @@ def describe_senate(old, new):
 
 
 def describe_house(old, new, ratings):
-    """Lines for Toss Up calls and Lean/Likely flips that changed since the last poll."""
+    """Lines for Toss Up calls and flips anywhere that changed since the last poll."""
     lines = []
     for key, race in new.items():
         prev_race = old.get(key) or {}
@@ -224,10 +224,7 @@ def describe_house(old, new, ratings):
         code = house_code(race)
         rating = ratings.get(code, "")
         tossup = rating == "Toss Up"
-        competitive = rating.startswith(("Lean", "Likely"))
-        if not (tossup or competitive):
-            continue
-        label = f"{code} ({rating})"
+        label = f"{code} ({rating})" if rating else code
         if cur is None:
             if prev and (tossup or prev_race.get("flippedSeat") or is_flip({**prev_race, "winner": prev})):
                 lines.append(f"{label}: call for {prev['name']} withdrawn")
@@ -347,7 +344,7 @@ def load_ratings(state):
 
 
 def poll_house(state):
-    """House district calls: Toss Up calls and Lean/Likely flips."""
+    """House district calls: Toss Up calls and flips anywhere."""
     ratings = load_ratings(state)
     if not ratings:
         return False
