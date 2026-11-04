@@ -3,7 +3,9 @@
 
 Senate: notifies when a race in SENATE_STATES (the toss-ups) is called, or when
 any race is called as a flip.
-House: notifies once, when a party reaches a majority (218 seats).
+House: notifies once, when a party reaches a majority (218 seats); on any call
+in a Toss Up district; and when any district is called as a flip.
+Ratings come from the Guardian's battlegrounds.json.
 
 Standard library only. Configuration is via environment variables:
 
@@ -11,6 +13,7 @@ Standard library only. Configuration is via environment variables:
   NTFY_SERVER    ntfy server base URL (default: https://ntfy.sh)
   NTFY_TOKEN     optional access token for a protected topic
   SENATE_STATES  toss-up states to notify on any call (default: AK,IA,KS,ME,OH,TX)
+  BATTLEGROUNDS_URL  race ratings file (default: the Guardian's battlegrounds.json)
   POLL_SECONDS   seconds between polls (default: 60, the API's max-age)
   STATE_FILE     where the last seen tally is stored (default: ./state.json)
   DRY_RUN        if "1", print notifications instead of sending them
@@ -32,6 +35,14 @@ SENATE_URL = (
     "https://interactive.guim.co.uk/2026/11/us-election-data/"
     "production/v1/latest/details/results_S.json"
 )
+HOUSE_URL = (
+    "https://interactive.guim.co.uk/2026/11/us-election-data/"
+    "production/v1/latest/details/results_H.json"
+)
+DEFAULT_BATTLEGROUNDS_URL = (
+    "https://interactive.guim.co.uk/atoms/2026/11/midterms/"
+    "assets/v/1793753806788/data/battlegrounds.json"
+)
 USER_AGENT = "midterms-watch/1.0"
 
 
@@ -46,6 +57,7 @@ NTFY_TOKEN = env("NTFY_TOKEN")
 POLL_SECONDS = int(env("POLL_SECONDS", "60"))
 STATE_FILE = env("STATE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"))
 DRY_RUN = env("DRY_RUN") == "1"
+BATTLEGROUNDS_URL = env("BATTLEGROUNDS_URL", DEFAULT_BATTLEGROUNDS_URL)
 
 
 def state_list(name, default):
@@ -121,8 +133,8 @@ def describe_changes(old, new):
     return lines
 
 
-def parse_senate(data):
-    """Reduce results_S.json to {race_key: race}, where race["winner"] is None until called."""
+def parse_races(data):
+    """Reduce results_S.json / results_H.json to {race_key: race}; race["winner"] is None until called."""
     races = {}
     for r in data:
         if r.get("level") != "state" or r.get("test"):
@@ -133,6 +145,7 @@ def parse_senate(data):
             "state": r["statePostal"],
             "stateName": r.get("stateName", r["statePostal"]),
             "seatName": r.get("seatName", ""),
+            "seatNum": str(r.get("seatNum", "")),
             "currentParty": r.get("currentParty"),
             "flippedSeat": r.get("flippedSeat"),
             "winner": None if winner is None else {
@@ -143,6 +156,22 @@ def parse_senate(data):
             },
         }
     return races
+
+
+parse_senate = parse_races
+
+
+def parse_ratings(data):
+    """Reduce battlegrounds.json to {"AZ-06": "Lean D"} for House districts."""
+    return {
+        f"{b['code'][:2]}-{b['code'][2:]}": b["rating"]
+        for b in data
+        if b.get("type") == "House" and b.get("code") and b.get("rating")
+    }
+
+
+def house_code(race):
+    return f"{race['state']}-{race['seatNum'].zfill(2)}"
 
 
 def is_flip(race):
@@ -181,6 +210,33 @@ def describe_senate(old, new):
         outcome = f"FLIP from {held}" if flip else "hold"
         share = f", {cur['voteShare']:.1f}%" if cur.get("voteShare") else ""
         lines.append(f"{name}: {cur['name']} ({party}) wins{share} · {party} {outcome}")
+    return lines
+
+
+def describe_house(old, new, ratings):
+    """Lines for Toss Up calls and flips anywhere that changed since the last poll."""
+    lines = []
+    for key, race in new.items():
+        prev_race = old.get(key) or {}
+        prev, cur = prev_race.get("winner"), race["winner"]
+        if prev == cur or (prev and cur and prev["name"] == cur["name"]):
+            continue
+        code = house_code(race)
+        rating = ratings.get(code, "")
+        tossup = rating == "Toss Up"
+        label = f"{code} ({rating})" if rating else code
+        if cur is None:
+            if prev and (tossup or prev_race.get("flippedSeat") or is_flip({**prev_race, "winner": prev})):
+                lines.append(f"{label}: call for {prev['name']} withdrawn")
+            continue
+        flip = is_flip(race)
+        if not (tossup or flip):
+            continue
+        party = PARTY_ABBR.get(cur["party"], cur["party"])
+        held = PARTY_ABBR.get(race["currentParty"], race["currentParty"])
+        outcome = f"FLIP from {held}" if flip else "hold"
+        share = f", {cur['voteShare']:.1f}%" if cur.get("voteShare") else ""
+        lines.append(f"{label}: {cur['name']} ({party}) wins{share} · {party} {outcome}")
     return lines
 
 
@@ -264,10 +320,63 @@ def poll_senate(state):
     return True
 
 
+_ratings_fetched = False
+
+
+def load_ratings(state):
+    """Fetch the ratings once per process; fall back to the copy saved in state."""
+    global _ratings_fetched
+    if _ratings_fetched:
+        return state.get("ratings") or {}
+    try:
+        _, _, data = fetch(BATTLEGROUNDS_URL)
+        ratings = parse_ratings(data)
+        if ratings:
+            state["ratings"] = ratings
+            _ratings_fetched = True
+            counts = {}
+            for r in ratings.values():
+                counts[r] = counts.get(r, 0) + 1
+            log("house ratings: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    except Exception as e:
+        log(f"ratings fetch failed: {e!r}" + ("; using saved copy" if state.get("ratings") else ""))
+    return state.get("ratings") or {}
+
+
+def poll_house(state):
+    """House district calls: Toss Up calls and flips anywhere."""
+    ratings = load_ratings(state)
+    if not ratings:
+        return False
+    status, etag, data = fetch(HOUSE_URL, state.get("house_etag"))
+    if status == 304 or data is None:
+        return False
+    races = parse_races(data)
+    if not races:
+        log("house feed returned no races; skipping")
+        return False
+    previous = state.get("house")
+    if previous is None:
+        lines = describe_house({}, races, ratings)
+        log(f"house baseline: {len(races)} races, {sum(1 for r in races.values() if r['winner'])} called"
+            + ("; already called: " + " | ".join(lines) if lines else ""))
+    else:
+        lines = describe_house(previous, races, ratings)
+        if lines:
+            flips = sum("FLIP" in l for l in lines)
+            title = "House flip" if flips == len(lines) else "House battleground called"
+            if len(lines) > 1:
+                title += f"s ({len(lines)})"
+            notify(title, "\n".join(lines), tags="house")
+            log("notified: " + " | ".join(lines))
+    state["house_etag"], state["house"] = etag, races
+    return True
+
+
 def poll_once(state):
     state = dict(state)
     changed = False
-    for poll in (poll_tracker, poll_senate):
+    for poll in (poll_tracker, poll_senate, poll_house):
         try:
             changed = poll(state) or changed
         except urllib.error.HTTPError as e:
