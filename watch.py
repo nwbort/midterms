@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Poll the Guardian's election feeds and push changes to ntfy.
 
-House: notifies whenever the chamber tally changes.
-Senate: notifies only for chosen states, when a race is called (SENATE_STATES)
-or when a Republican is declared the winner (SENATE_GOP_WIN_STATES).
+Senate: notifies when a race in SENATE_STATES (the toss-ups) is called, or when
+any race is called as a flip.
+House: notifies once, when a party reaches a majority (218 seats).
 
 Standard library only. Configuration is via environment variables:
 
   NTFY_TOPIC     ntfy topic to publish to (required unless DRY_RUN=1)
   NTFY_SERVER    ntfy server base URL (default: https://ntfy.sh)
   NTFY_TOKEN     optional access token for a protected topic
-  SENATE_STATES          states to notify on any call (default: AK,IA,KS,ME,OH,TX)
-  SENATE_GOP_WIN_STATES  states to notify on a Republican win (default: GA,NC,MI,MN,NH)
+  SENATE_STATES  toss-up states to notify on any call (default: AK,IA,KS,ME,OH,TX)
   POLL_SECONDS   seconds between polls (default: 60, the API's max-age)
   STATE_FILE     where the last seen tally is stored (default: ./state.json)
   DRY_RUN        if "1", print notifications instead of sending them
@@ -54,8 +53,8 @@ def state_list(name, default):
 
 
 SENATE_STATES = state_list("SENATE_STATES", "AK,IA,KS,ME,OH,TX")
-SENATE_GOP_WIN_STATES = state_list("SENATE_GOP_WIN_STATES", "GA,NC,MI,MN,NH")
-PARTY_ABBR = {"Dem": "D", "GOP": "R"}
+HOUSE_MAJORITY = 218
+PARTY_ABBR = {"Dem": "D", "GOP": "R", "Ind": "I", "NP": "I"}
 ONCE = env("ONCE") == "1"
 
 
@@ -104,12 +103,10 @@ def parse(data):
     return tally
 
 
-def describe_changes(old, new, skip=()):
+def describe_changes(old, new):
     """Return a list of human-readable lines, one per chamber that changed."""
     lines = []
     for chamber, cur in new.items():
-        if chamber in skip:
-            continue
         prev = old.get(chamber)
         if prev == cur:
             continue
@@ -137,46 +134,62 @@ def parse_senate(data):
             "stateName": r.get("stateName", r["statePostal"]),
             "seatName": r.get("seatName", ""),
             "currentParty": r.get("currentParty"),
+            "flippedSeat": r.get("flippedSeat"),
             "winner": None if winner is None else {
                 "name": " ".join(x for x in (winner.get("first"), winner.get("last")) if x),
                 "party": winner.get("party"),
                 "voteShare": winner.get("voteShare"),
+                "incumbent": bool(winner.get("incumbent")),
             },
         }
     return races
 
 
-def senate_watched(race):
-    """Return True if this race's current result should trigger a notification."""
-    if race["state"] in SENATE_STATES:
-        return True
+def is_flip(race):
+    """True if the called winner takes the seat from the party that held it."""
     w = race["winner"]
-    return race["state"] in SENATE_GOP_WIN_STATES and w is not None and w["party"] == "GOP"
+    if w is None:
+        return False
+    if race["flippedSeat"] is not None:
+        return bool(race["flippedSeat"])
+    if w["incumbent"]:
+        return False
+    return w["party"] != race["currentParty"]
 
 
 def describe_senate(old, new):
-    """Return lines for watched races whose call changed since the last poll."""
+    """Return lines for toss-up calls and flips that changed since the last poll."""
     lines = []
     for key, race in new.items():
-        prev = (old.get(key) or {}).get("winner")
-        cur = race["winner"]
+        prev_race = old.get(key) or {}
+        prev, cur = prev_race.get("winner"), race["winner"]
         if prev == cur or (prev and cur and prev["name"] == cur["name"]):
             continue
         name = race["stateName"]
         if race["seatName"] and "Unexpired" in race["seatName"]:
             name += " (special)"
+        tossup = race["state"] in SENATE_STATES
         if cur is None:
-            if prev and (race["state"] in SENATE_STATES or prev["party"] == "GOP" and race["state"] in SENATE_GOP_WIN_STATES):
+            if prev and (tossup or prev_race.get("flippedSeat") or is_flip({**prev_race, "winner": prev})):
                 lines.append(f"{name}: call for {prev['name']} withdrawn")
             continue
-        if not senate_watched(race):
+        flip = is_flip(race)
+        if not (tossup or flip):
             continue
         party = PARTY_ABBR.get(cur["party"], cur["party"])
         held = PARTY_ABBR.get(race["currentParty"], race["currentParty"])
-        outcome = "hold" if cur["party"] == race["currentParty"] else f"FLIP from {held}"
+        outcome = f"FLIP from {held}" if flip else "hold"
         share = f", {cur['voteShare']:.1f}%" if cur.get("voteShare") else ""
         lines.append(f"{name}: {cur['name']} ({party}) wins{share} · {party} {outcome}")
     return lines
+
+
+def house_called(tally):
+    """Return the party name with a House majority, or None."""
+    for party, seats in (tally.get("House") or {}).get("parties", {}).items():
+        if seats >= HOUSE_MAJORITY:
+            return party
+    return None
 
 
 def notify(title, body, tags="ballot_box_with_ballot"):
@@ -209,7 +222,7 @@ def save_state(state):
 
 
 def poll_tracker(state):
-    """House tally from the fronts tracker. Senate is handled per state below."""
+    """House tally from the fronts tracker: notify when a party reaches a majority."""
     status, etag, data = fetch(FEED_URL, state.get("etag"))
     if status == 304 or data is None:
         return False
@@ -221,10 +234,11 @@ def poll_tracker(state):
     if previous is None:
         log("first run, baseline: " + " | ".join(describe_changes({}, tally)))
     else:
-        lines = describe_changes(previous, tally, skip=("Senate",))
-        if lines:
-            notify("Midterms: seats called", "\n".join(lines))
-            log("notified: " + " | ".join(lines))
+        winner, before = house_called(tally), house_called(previous)
+        if winner and winner != before:
+            line = describe_changes({}, {"House": tally["House"]})[0]
+            notify(f"House called for the {winner}", line, tags="tada")
+            log(f"notified: House called for {winner} · {line}")
     state["etag"], state["tally"] = etag, tally
     return True
 

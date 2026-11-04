@@ -1,28 +1,25 @@
 # midterms
 
-Polls the Guardian's US midterms data and sends [ntfy](https://ntfy.sh) pushes:
+Polls the Guardian's US midterms data and sends [ntfy](https://ntfy.sh) pushes for:
 
-- **House**: whenever the chamber tally changes (from
-  `zug.guardianapis.com/.../congress-fronts-tracker/all/v1`).
-- **Senate**: only for selected states (from
-  `interactive.guim.co.uk/.../details/results_S.json`):
-  - any call in `SENATE_STATES` (default AK, IA, KS, ME, OH, TX)
-  - a Republican win in `SENATE_GOP_WIN_STATES` (default GA, NC, MI, MN, NH)
-
-  A withdrawn call in those states is also sent.
+- **Senate** (`interactive.guim.co.uk/.../details/results_S.json`):
+  - any call in a toss-up state, `SENATE_STATES` (default AK, IA, KS, ME, OH, TX)
+  - any race anywhere that is called as a flip
+  - a withdrawn call for either of the above
+- **House** (`zug.guardianapis.com/.../congress-fronts-tracker/all/v1`): once,
+  when a party reaches 218 seats.
 
 Example notifications:
 
 ```
-Midterms: seats called
-House: D 6 (+1), R 2 · 8/435 called (+1)
-
 Senate race called
-New Hampshire: John Sununu (R) wins, 51.2% · R FLIP from D
+Michigan: Mike Rogers (R) wins, 51.2% · R FLIP from D
+
+House called for the Democrats
+House: D 218, R 190 · 408/435 called
 ```
 
-House figures show the running tally, so the change in brackets is what
-matters. On the first run each feed records a baseline and sends nothing.
+On the first run each feed records a baseline and sends nothing.
 
 The script is plain Python 3 with no dependencies. It sends the last ETag with
 each request to each feed, so polls where nothing changed come back as `304` with no body.
@@ -39,8 +36,7 @@ NTFY_TOPIC=my-topic ONCE=1 python3 watch.py
 | `NTFY_TOPIC`   | (required)           | Topic to publish to                    |
 | `NTFY_SERVER`  | `https://ntfy.sh`    | Self-hosted server, if you have one    |
 | `NTFY_TOKEN`   | unset                | Bearer token for a protected topic     |
-| `SENATE_STATES` | `AK,IA,KS,ME,OH,TX` | Notify on any Senate call here       |
-| `SENATE_GOP_WIN_STATES` | `GA,NC,MI,MN,NH` | Notify only if a Republican wins |
+| `SENATE_STATES` | `AK,IA,KS,ME,OH,TX` | Toss-ups: notify on any call         |
 | `POLL_SECONDS` | `60`                 | Matches the feed's `max-age=60`        |
 | `STATE_FILE`   | `./state.json`       | Last seen tally and ETag               |
 | `DRY_RUN`      | unset                | `1` prints instead of sending          |
