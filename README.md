@@ -8,6 +8,13 @@ Polls the Guardian's US midterms data and sends [ntfy](https://ntfy.sh) pushes f
   - a withdrawn call for either of the above
 - **House** (`zug.guardianapis.com/.../congress-fronts-tracker/all/v1`): once,
   when a party reaches 218 seats.
+- **House districts** (`.../details/results_H.json`, rated by the Guardian's
+  `battlegrounds.json`):
+  - any call in a **Toss Up** district
+  - a **Lean** or **Likely** district called as a flip
+  - a withdrawn call for either of the above
+  - Solid seats are ignored. Ratings are fetched once at startup and saved
+    in the state file in case a later fetch fails.
 
 Example notifications:
 
@@ -17,6 +24,9 @@ Michigan: Mike Rogers (R) wins, 51.2% · R FLIP from D
 
 House called for the Democrats
 House: D 218, R 190 · 408/435 called
+
+House flip
+AZ-06 (Lean D): Jane Roe (R) wins, 50.4% · R FLIP from D
 ```
 
 On the first run each feed records a baseline and sends nothing.
@@ -37,6 +47,7 @@ NTFY_TOPIC=my-topic ONCE=1 python3 watch.py
 | `NTFY_SERVER`  | `https://ntfy.sh`    | Self-hosted server, if you have one    |
 | `NTFY_TOKEN`   | unset                | Bearer token for a protected topic     |
 | `SENATE_STATES` | `AK,IA,KS,ME,OH,TX` | Toss-ups: notify on any call         |
+| `BATTLEGROUNDS_URL` | Guardian's file | Race ratings (`battlegrounds.json`) |
 | `POLL_SECONDS` | `60`                 | Matches the feed's `max-age=60`        |
 | `STATE_FILE`   | `./state.json`       | Last seen tally and ETag               |
 | `DRY_RUN`      | unset                | `1` prints instead of sending          |
